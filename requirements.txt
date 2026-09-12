@@ -1,0 +1,6 @@
+streamlit>=1.36
+pandas>=2.0
+# Private sheet (service account) ke liye:
+gspread>=6.0
+# Excel file upload ke liye:
+openpyxl>=3.1

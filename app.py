@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import html as _html
 import io
+import json
+from pathlib import Path
 from datetime import date, timedelta
 
 import pandas as pd
@@ -16,7 +18,9 @@ import streamlit as st
 import core
 from core import (
     BAND_META, BAND_ORDER, COL_DESC, COL_ORDER_NO, COL_PARTY, COL_REMARK,
-    STATUS_DELIVERED, STATUS_IN_PROCESS, STATUS_PENDING, STATUS_READY,
+    COL_STATUS,
+    STATUS_DELIVERED, STATUS_IN_PROCESS, STATUS_PARTY_DELAYED,
+    STATUS_PENDING, STATUS_READY,
     Settings, build_priority_table, summary_stats,
 )
 
@@ -103,6 +107,49 @@ st.markdown("""
 # ---------------------------------------------------------------------------
 # Data loading
 # ---------------------------------------------------------------------------
+CONFIG_PATH = Path(__file__).with_name("app_config.json")
+
+DEFAULT_CONFIG = {
+    "source": "Demo data",
+    "sheet_url": "",
+    "worksheet": "Order sheet",
+    "horizon": 7,
+    "show_delivered": False,
+}
+
+
+def load_config() -> dict:
+    """
+    Settings ek baar bharo, hamesha yaad rahengi.
+    app_config.json isi folder me banti hai - app band karke dobara kholo
+    to bhi sheet ka link wahi rehta hai.
+    """
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        if CONFIG_PATH.exists():
+            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    # Streamlit Cloud par file save nahi rehti, wahan secrets.toml se aata hai
+    if not cfg.get("sheet_url"):
+        secret_url = safe_secret("sheet_url", "")
+        if secret_url:
+            cfg["sheet_url"] = secret_url
+            if cfg["source"] == "Demo data":
+                cfg["source"] = "Google Sheet (public link)"
+    return cfg
+
+
+def save_config(cfg: dict) -> bool:
+    try:
+        CONFIG_PATH.write_text(
+            json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return True
+    except Exception:
+        return False  # cloud par read-only ho sakta hai
+
+
 def safe_secret(key: str, default=None):
     """secrets.toml na ho to bhi app crash na ho."""
     try:
@@ -122,12 +169,12 @@ def csv_export_url(sheet_url: str, gid: str = "0") -> str:
     return f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
 
 
-@st.cache_data(ttl=120, show_spinner="Google Sheet se data aa raha hai...")
+@st.cache_data(ttl=60, show_spinner="Google Sheet se data aa raha hai...")
 def load_public_sheet(sheet_url: str) -> pd.DataFrame:
     return pd.read_csv(csv_export_url(sheet_url), dtype=str, header=None).fillna("")
 
 
-@st.cache_data(ttl=120, show_spinner="Google Sheet se data aa raha hai...")
+@st.cache_data(ttl=60, show_spinner="Google Sheet se data aa raha hai...")
 def load_private_sheet(sheet_url: str, worksheet: str, creds_dict: dict) -> pd.DataFrame:
     import gspread  # sirf zaroorat padne par import
 
@@ -166,46 +213,88 @@ def load_data(source: str, sheet_url: str, worksheet: str, upload) -> pd.DataFra
 # ---------------------------------------------------------------------------
 # Sidebar - settings
 # ---------------------------------------------------------------------------
+CFG = load_config()
+SOURCES = [
+    "Google Sheet (public link)",
+    "Google Sheet (private / service account)",
+    "File upload (CSV / Excel)",
+    "Demo data",
+]
+
+if "edit_source" not in st.session_state:
+    # Pehli baar (koi sheet save nahi hai) to setup khula rahega
+    st.session_state.edit_source = not bool(CFG.get("sheet_url"))
+
 with st.sidebar:
     st.header("⚙️ Settings")
 
-    source = st.radio(
-        "Data kahan se lena hai",
-        [
-            "Google Sheet (public link)",
-            "Google Sheet (private / service account)",
-            "File upload (CSV / Excel)",
-            "Demo data",
-        ],
-        index=3,
-    )
+    source = CFG.get("source", "Demo data")
+    if source not in SOURCES:
+        source = "Demo data"
+    sheet_url = CFG.get("sheet_url", "")
+    worksheet = CFG.get("worksheet", "Order sheet")
+    upload = None
 
-    sheet_url, worksheet, upload = "", "", None
-    if source.startswith("Google Sheet"):
-        sheet_url = st.text_input(
-            "Sheet ka link",
-            value=safe_secret("sheet_url", "") or "",
-            placeholder="https://docs.google.com/spreadsheets/d/.../edit",
+    # ---- Jud chuki sheet ka short view ----
+    if not st.session_state.edit_source:
+        if source.startswith("Google Sheet"):
+            short = sheet_url[:38] + "..." if len(sheet_url) > 38 else sheet_url
+            st.success("🔗 शीट जुड़ी हुई है")
+            st.caption(short)
+        else:
+            st.info(f"डेटा: {source}")
+        if st.button("✏️ शीट बदलो", use_container_width=True):
+            st.session_state.edit_source = True
+            st.rerun()
+
+    # ---- Setup form ----
+    else:
+        with st.form("source_form", clear_on_submit=False):
+            new_source = st.radio(
+                "Data kahan se lena hai", SOURCES, index=SOURCES.index(source)
+            )
+            new_url = st.text_input(
+                "Sheet ka link", value=sheet_url,
+                placeholder="https://docs.google.com/spreadsheets/d/.../edit",
+            )
+            new_ws = st.text_input(
+                "Worksheet ka naam (sirf private sheet ke liye)", value=worksheet
+            )
+            saved = st.form_submit_button("💾 Save karo", use_container_width=True,
+                                          type="primary")
+        if saved:
+            CFG.update({"source": new_source, "sheet_url": new_url.strip(),
+                        "worksheet": new_ws.strip() or "Order sheet"})
+            ok = save_config(CFG)
+            st.session_state.edit_source = False
+            if not ok:
+                st.warning("Settings file save nahi ho payi (read-only folder). "
+                           "Cloud par secrets me sheet_url daal do.")
+            st.rerun()
+        source, sheet_url, worksheet = (
+            CFG.get("source"), CFG.get("sheet_url"), CFG.get("worksheet")
         )
-        if "private" in source:
-            worksheet = st.text_input("Worksheet ka naam", value="Order sheet")
-    elif source.startswith("File"):
+
+    if source.startswith("File"):
         upload = st.file_uploader("CSV ya Excel file", type=["csv", "xlsx", "xls"])
 
     st.divider()
-    pieces_per_day = st.number_input(
-        "Ek din me kitne piece ka kaam? ",
-        min_value=1, max_value=2000, value=60, step=10,
-        help="Isi se anuman lagta hai ki order kitne din lega aur kab shuru karna hai.",
-    )
-    horizon = st.slider("Aaj ki list me kitne din aage tak dekhein", 1, 15, 7)
-    show_delivered = st.checkbox("Delivered orders bhi dikhao", value=False)
+    horizon = st.slider("आज की लिस्ट में कितने दिन आगे तक देखें",
+                        1, 15, int(CFG.get("horizon", 7)))
+    show_delivered = st.checkbox("डिलीवर हो चुके ऑर्डर भी दिखाओ",
+                                 value=bool(CFG.get("show_delivered", False)))
+
+    # Settings badli to chupchaap save kar do
+    if (horizon != CFG.get("horizon")
+            or show_delivered != CFG.get("show_delivered")):
+        CFG.update({"horizon": int(horizon), "show_delivered": bool(show_delivered)})
+        save_config(CFG)
 
     st.divider()
     if st.button("🔄 Data refresh karo", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    st.caption("Data har 2 minute me apne aap refresh hota hai.")
+    st.caption("डेटा हर 1 मिनट में अपने आप रिफ़्रेश होता है।")
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +312,7 @@ if raw is None:
     st.stop()
 
 today = date.today()
-df = build_priority_table(raw, Settings(pieces_per_day=int(pieces_per_day), today=today))
+df = build_priority_table(raw, Settings(today=today))
 
 if df.empty:
     st.warning("Sheet me koi order nahi mila. Column ke naam check karo.")
@@ -246,8 +335,6 @@ st.markdown(f"""
 cards = [
     ("#b3261e", stats["overdue"], "⏱️", "डेट निकल गई",
      "डिलीवरी डेट बीत चुकी, काम अब भी बाकी"),
-    ("#e8590c", stats["start_now"], "🔨", "आज शुरू करो",
-     "आज हाथ नहीं लगाया तो डेट निकल जाएगी"),
     ("#c9a227", stats["today"], "🚚", "आज डिलीवरी",
      "आज ही पार्टी को देना है"),
     ("#2563eb", stats["this_week"], "📆", "इस हफ़्ते",
@@ -255,7 +342,11 @@ cards = [
     ("#6b46c1", stats["no_date"], "📅", "डेट मिसिंग",
      "शीट में DEL. DATE खाली है — भर दो"),
     ("#475569", stats["total_open"], "📋", "कुल पेंडिंग",
-     "जितने ऑर्डर का काम अभी बाकी है"),
+     "जिन पर फ़ैक्ट्री में काम बाकी है"),
+    ("#0d9488", stats.get("ready_waiting", 0), "📦", "तैयार, डिलीवरी बाकी",
+     "बनकर शोरूम में रखे हैं"),
+    ("#7c3aed", stats.get("party_delayed", 0), "⏸️", "पार्टी की वजह से रुके",
+     "देरी पार्टी की तरफ़ से है"),
     ("#2f7d32", stats["delivered"], "✅", "डिलीवर हो चुके",
      "काम खत्म, पार्टी को चले गए"),
 ]
@@ -275,23 +366,25 @@ st.markdown(
 
 with st.expander("❓ ये नंबर क्या बताते हैं?"):
     st.markdown(
-        "- **डेट निकल गई** — डिलीवरी की तारीख बीत चुकी है पर ऑर्डर अब तक डिलीवर नहीं हुआ। "
+        "- **डेट निकल गई** — डिलीवरी की तारीख बीत चुकी है और काम अब भी बाकी है। "
         "सबसे पहले यही निपटाओ।\n"
-        "- **आज शुरू करो** — इतना काम है कि आज शुरू नहीं किया तो डेट पर पूरा नहीं होगा। "
-        "(डिलीवरी डेट − काम के दिन = आज या उससे पहले)\n"
         "- **आज डिलीवरी** — आज ही पार्टी को भेजना है।\n"
         "- **इस हफ़्ते** — अगले 7 दिन के अंदर डिलीवरी वाले ऑर्डर।\n"
         "- **डेट मिसिंग** — शीट के DEL. DATE कॉलम में कुछ नहीं लिखा। "
         "इनकी प्रायोरिटी नहीं निकल सकती, इसलिए भरना ज़रूरी है।\n"
-        "- **कुल पेंडिंग** — जो डिलीवर नहीं हुए, सब मिलाकर।\n"
-        "- **डिलीवर हो चुके** — खत्म हो चुके ऑर्डर, मेन लिस्ट से हटा दिए गए हैं।\n\n"
-        "एक ऑर्डर एक से ज़्यादा डिब्बों में गिना जा सकता है — जैसे आज डिलीवरी वाला "
-        "ऑर्डर 'इस हफ़्ते' में भी आएगा।"
+        "- **कुल पेंडिंग** — जिन पर फ़ैक्ट्री में काम बाकी है (Pending + In Process)।\n"
+        "- **तैयार, डिलीवरी बाकी** — हमारा काम पूरा, माल शोरूम में रखा है।\n"
+        "- **पार्टी की वजह से रुके** — REMARK में *PARTY SIDE DELAYED* लिखा है। "
+        "देरी हमारी तरफ़ से नहीं।\n"
+        "- **डिलीवर हो चुके** — खत्म हो चुके ऑर्डर।\n\n"
+        "ऊपर की तीनों 'रुकी हुई' क़िस्में प्रायोरिटी लिस्ट से बाहर रखी गई हैं — "
+        "हर एक की अपनी टैब है। एक ऑर्डर एक से ज़्यादा डिब्बों में गिना जा सकता है "
+        "(आज डिलीवरी वाला 'इस हफ़्ते' में भी आएगा)।"
     )
 
 if stats["overdue"]:
-    st.error(f"⚠️ {stats['overdue']} order ki delivery date nikal chuki hai aur "
-             f"kaam abhi baaki hai. Sabse upar dekho.")
+    st.error(f"⚠️ {stats['overdue']} ऑर्डर की डिलीवरी डेट निकल चुकी है और काम अब भी "
+             f"बाकी है। सबसे ऊपर वही हैं।")
 if stats["no_date"]:
     st.warning(f"📅 {stats['no_date']} order me delivery date khaali hai — "
                f"sheet me bhar do, tabhi priority sahi lagegi.")
@@ -304,6 +397,7 @@ STATUS_COLORS = {
     STATUS_PENDING: "#64748b",
     STATUS_IN_PROCESS: "#2563eb",
     STATUS_READY: "#0d9488",
+    STATUS_PARTY_DELAYED: "#7c3aed",
     STATUS_DELIVERED: "#2f7d32",
 }
 
@@ -328,19 +422,17 @@ def fmt_days(days) -> str:
     return f"{d} दिन बचे"
 
 
-def start_line(row) -> str:
-    if core._is_missing(row["start_by"]):
-        return "शुरू करने की तारीख — डेट भरने पर पता चलेगी"
-    sb = row["start_by"]
-    slack = row["slack"]
-    if core._is_missing(slack):
-        return f"शुरू करो: {sb.strftime('%d %b')}"
-    s = int(slack)
-    if s < 0:
-        return f"⏰ {abs(s)} दिन पहले ही शुरू हो जाना चाहिए था ({sb.strftime('%d %b')})"
-    if s == 0:
-        return f"⏰ आज ही शुरू करना है ({sb.strftime('%d %b')})"
-    return f"शुरू करो {sb.strftime('%d %b')} तक — {s} दिन की ढील है"
+def waiting_text(row) -> str:
+    """Ready / party-delayed order kitne din se ruka hua hai."""
+    d = row["days_left"]
+    if core._is_missing(d):
+        return "डिलीवरी बाकी"
+    d = int(d)
+    if d < 0:
+        return f"{abs(d)} दिन से रुका है"
+    if d == 0:
+        return "आज उठाना है"
+    return f"{d} दिन में उठेगा"
 
 
 def render_card(row, show_rank: bool = True):
@@ -355,6 +447,12 @@ def render_card(row, show_rank: bool = True):
     # uska kaam khatam ho chuka, isliye hara band
     if status == STATUS_DELIVERED:
         band = {"color": "#2f7d32", "emoji": "✅", "hindi": "डिलीवर हो गया"}
+    elif status == STATUS_PARTY_DELAYED:
+        # Deri party ki taraf se hai - laal band galat sandesh dega
+        band = {"color": "#7c3aed", "emoji": "⏸️", "hindi": "पार्टी की वजह से रुका"}
+    elif status == STATUS_READY:
+        # Hamara kaam ho chuka - "date nikal gayi" laal band galat lagta hai
+        band = {"color": "#0d9488", "emoji": "📦", "hindi": "तैयार, डिलीवरी बाकी"}
     rank = row["priority_rank"]
     rank_html = (
         f'<span class="rank">#{int(rank)}</span>'
@@ -376,13 +474,14 @@ def render_card(row, show_rank: bool = True):
         f'<span class="pill" style="background:{band["color"]}">'
         f'{band["emoji"]} {band["hindi"]}</span>'
         f'<span class="pill" style="background:{status_color}">{status}</span>'
-        + (f'<span class="pill-soft">{fmt_days(row["days_left"])}</span>'
+        + (f'<span class="pill-soft">{waiting_text(row)}</span>'
+           if status in (STATUS_READY, STATUS_PARTY_DELAYED) else
+           f'<span class="pill-soft">{fmt_days(row["days_left"])}</span>'
            if status != STATUS_DELIVERED else "")
         + '</div>'
         f'<div class="desc">{desc}</div>'
         f'<div class="meta">📦 <b>{int(row["quantity"])}</b> pcs &nbsp;·&nbsp; '
-        f'🛠️ लगभग <b>{int(row["work_days"])}</b> दिन का काम &nbsp;·&nbsp; '
-        f'🚚 डिलीवरी <b>{del_txt}</b><br>{esc(start_line(row))}</div>'
+        f'🚚 डिलीवरी <b>{del_txt}</b></div>'
         + (f'<div class="remark">📝 {remark}</div>' if remark else "")
         + '</div>'
     )
@@ -392,7 +491,13 @@ def render_card(row, show_rank: bool = True):
 # ---------------------------------------------------------------------------
 # Filters
 # ---------------------------------------------------------------------------
-open_df = df[df["status"] != STATUS_DELIVERED].copy()
+# open_df = sirf wo kaam jo factory me baaki hai (Pending + In Process).
+# Ready wale showroom me taiyar rakhe hain - party lene nahi aayi,
+# isliye wo delay hamara nahi. Unki alag list hai.
+open_df = df[df["status"].map(core.is_work_pending)].copy()
+ready_df = df[df["status"] == STATUS_READY].copy()
+# Party ki taraf se ruke hue - inka delay hamara nahi
+party_df = df[df["status"] == STATUS_PARTY_DELAYED].copy()
 done_df = df[df["status"] == STATUS_DELIVERED].copy()
 
 st.markdown('<div class="no-print"></div>', unsafe_allow_html=True)
@@ -401,7 +506,8 @@ with fc1:
     search = st.text_input("🔍 पार्टी / ऑर्डर नंबर / आइटम ढूँढो", "")
 with fc2:
     status_pick = st.multiselect(
-        "स्टेटस", [STATUS_PENDING, STATUS_IN_PROCESS, STATUS_READY], []
+        "स्टेटस", [STATUS_PENDING, STATUS_IN_PROCESS], [],
+        help="Ready wale orders ki apni alag tab hai (तैयार – डिलीवरी बाकी).",
     )
 with fc3:
     band_pick = st.multiselect(
@@ -431,9 +537,12 @@ def apply_filters(d: pd.DataFrame, use_status: bool = True) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Tabs
 # ---------------------------------------------------------------------------
-tab_today, tab_all, tab_party, tab_missing, tab_done, tab_table = st.tabs([
-    f"🔥 आज का काम",
+(tab_today, tab_all, tab_ready, tab_pdelay, tab_party, tab_missing,
+ tab_done, tab_table) = st.tabs([
+    "🔥 आज का काम",
     f"📋 पूरी प्रायोरिटी लिस्ट ({len(open_df)})",
+    f"📦 तैयार – डिलीवरी बाकी ({len(ready_df)})",
+    f"⏸️ पार्टी की वजह से रुके ({len(party_df)})",
     "👥 पार्टी के हिसाब से",
     f"📅 डेट मिसिंग ({stats['no_date']})",
     f"✅ डिलीवर हो चुके ({len(done_df)})",
@@ -443,14 +552,12 @@ tab_today, tab_all, tab_party, tab_missing, tab_done, tab_table = st.tabs([
 with tab_today:
     today_df = apply_filters(open_df)
     urgent = today_df[
-        today_df.apply(
-            lambda r: (not core._is_missing(r["slack"]) and r["slack"] <= 0)
-            or (not core._is_missing(r["days_left"]) and r["days_left"] <= horizon),
-            axis=1,
+        today_df["days_left"].map(
+            lambda d: not core._is_missing(d) and d <= horizon
         )
     ] if not today_df.empty else today_df
     st.caption(f"जिन पर आज मेहनत लगनी है — {len(urgent)} ऑर्डर "
-               f"(अगले {horizon} दिन + जो पहले ही शुरू होने चाहिए थे)")
+               f"(डेट निकल चुकी + अगले {horizon} दिन वाले)")
     if urgent.empty:
         st.success("🎉 अगले कुछ दिनों में कोई अर्जेंट डिलीवरी नहीं है। आगे के ऑर्डर पर काम बढ़ाओ।")
     for _, row in urgent.iterrows():
@@ -462,6 +569,41 @@ with tab_all:
     st.caption(f"{len(filtered)} ऑर्डर · ऊपर से नीचे यही क्रम है काम का")
     for _, row in filtered.iterrows():
         render_card(row)
+
+with tab_ready:
+    st.caption("हमारा काम पूरा हो चुका, माल शोरूम में रखा है — पार्टी को उठाना बाकी है। "
+               "ये प्रायोरिटी लिस्ट और 'आज का काम' में नहीं आते, क्योंकि देरी हमारी तरफ़ से नहीं है।")
+    rd = apply_filters(ready_df, use_status=False)
+    if rd.empty:
+        st.success("कोई ऑर्डर शोरूम में रखा नहीं है।")
+    else:
+        # Sabse purana upar - jo sabse zyada din se pada hai
+        rd = rd.sort_values(
+            by="days_left", key=lambda c: c.map(lambda v: 9999 if core._is_missing(v) else v)
+        )
+        stuck = rd[rd["days_left"].map(lambda v: not core._is_missing(v) and v < -15)]
+        if len(stuck):
+            st.warning(f"⏳ {len(stuck)} ऑर्डर 15 दिन से ज़्यादा समय से रखे हैं — "
+                       f"पार्टी को फ़ोन कर लो।")
+        st.caption(f"{len(rd)} ऑर्डर · सबसे पुराना ऊपर")
+    for _, row in rd.iterrows():
+        render_card(row, show_rank=False)
+
+with tab_pdelay:
+    st.caption("इनके REMARK में *PARTY SIDE DELAYED* लिखा है — यानी रुकावट पार्टी "
+               "की तरफ़ से है, हमारी नहीं। इसलिए ये प्रायोरिटी लिस्ट और देरी की "
+               "गिनती से बाहर हैं।")
+    pd_df = apply_filters(party_df, use_status=False)
+    if pd_df.empty:
+        st.success("पार्टी की वजह से कोई ऑर्डर रुका हुआ नहीं है।")
+    else:
+        pd_df = pd_df.sort_values(
+            by="days_left",
+            key=lambda c: c.map(lambda v: 9999 if core._is_missing(v) else v),
+        )
+        st.caption(f"{len(pd_df)} ऑर्डर · सबसे पुराना ऊपर")
+    for _, row in pd_df.iterrows():
+        render_card(row, show_rank=False)
 
 with tab_party:
     filtered = apply_filters(open_df)
@@ -496,11 +638,11 @@ with tab_table:
         st.caption(f"फ़िल्टर लगा है — {len(tdf)} / {len(df)} ऑर्डर")
     view = tdf[[
         "priority_rank", COL_ORDER_NO, COL_PARTY, "del_date", "days_left",
-        "status", "band", "quantity", "work_days", "start_by", COL_DESC, COL_REMARK,
+        "status", "band", "quantity", COL_DESC, COL_REMARK, COL_STATUS,
     ]].rename(columns={
         "priority_rank": "Priority", "del_date": "Delivery Date",
         "days_left": "Days Left", "status": "Status", "band": "Band",
-        "quantity": "Qty", "work_days": "Work Days", "start_by": "Start By",
+        "quantity": "Qty", COL_STATUS: "STATUS (sheet)",
     })
     st.dataframe(view, use_container_width=True, hide_index=True)
     st.download_button(
@@ -509,6 +651,29 @@ with tab_table:
         file_name=f"order_priority_{today:%Y%m%d}.csv",
         mime="text/csv",
     )
+
+    with st.expander("🔍 कोई ऑर्डर गलत स्टेटस दिखा रहा है? यहाँ चेक करो"):
+        st.caption("ऐप ने शीट से उस row में असल में क्या पढ़ा — अगर STATUS यहाँ "
+                   "खाली दिख रहा है तो शीट में सेव नहीं हुआ या डेटा पुराना है "
+                   "(साइडबार में 🔄 Refresh दबाओ)।")
+        q = st.text_input("ऑर्डर नंबर डालो (जैसे OD22)", key="dbg")
+        if q.strip():
+            hit = df[df[COL_ORDER_NO].astype(str).str.strip().str.lower()
+                     == q.strip().lower()]
+            if hit.empty:
+                st.warning("ये ऑर्डर नंबर शीट में नहीं मिला।")
+            else:
+                r = hit.iloc[0]
+                st.write({
+                    "ORDER NO.": r[COL_ORDER_NO],
+                    "PARTY": r[COL_PARTY],
+                    "DEL. DATE (sheet)": r[core.COL_DEL_DATE],
+                    "DEL. DATE (padha gaya)": str(r["del_date"]),
+                    "STATUS (sheet me jo hai)": repr(r[COL_STATUS]),
+                    "REMARK (sheet me jo hai)": repr(r[COL_REMARK]),
+                    "STATUS (jo nikla)": r["status"],
+                    "QUANTITY": int(r["quantity"]),
+                })
 
 st.caption("Order Priority System · डेटा सीधे Google Sheet से आता है — शीट बदलो, "
            "यहाँ Refresh दबाओ।")

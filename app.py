@@ -18,7 +18,7 @@ import streamlit as st
 import core
 from core import (
     BAND_META, BAND_ORDER, COL_DESC, COL_ORDER_NO, COL_PARTY, COL_REMARK,
-    COL_STATUS,
+    COL_STATUS, COL_PROD_STAGE,
     STATUS_DELIVERED, STATUS_IN_PROCESS, STATUS_PARTY_DELAYED,
     STATUS_PENDING, STATUS_READY,
     Settings, build_priority_table, summary_stats,
@@ -84,6 +84,11 @@ st.markdown("""
     font-size: .7rem; font-weight: 600; padding: 3px 9px; border-radius: 20px;
     background: rgba(0,0,0,.07); letter-spacing: .3px;
   }
+  .pill-stage {
+    font-size: .72rem; font-weight: 600; padding: 3px 10px; border-radius: 20px;
+    background: #fef3c7; color: #7c4a03; border: 1px solid #f0c674;
+    white-space: normal; max-width: 100%;
+  }
   .desc {
     font-size: .84rem; opacity: .85; margin-top: 8px; white-space: pre-line;
     line-height: 1.45;
@@ -96,9 +101,35 @@ st.markdown("""
     .stApp header, .stSidebar, .stTabs [role="tablist"], .no-print {display: none !important;}
     .card {break-inside: avoid;}
   }
+  /* ---------- Mobile ---------- */
   @media (max-width: 640px) {
-    .stat .n {font-size: 1.4rem;}
-    .hero h1 {font-size: 1.15rem;}
+    .block-container {padding-left: .7rem; padding-right: .7rem; padding-top: .8rem;}
+    .hero {padding: 13px 15px; border-radius: 12px;}
+    .hero h1 {font-size: 1.1rem;}
+    .hero p {font-size: .76rem;}
+
+    /* do-do card ek line me */
+    .stat-grid {grid-template-columns: repeat(2, 1fr); gap: 8px;}
+    .stat {padding: 10px 11px; border-left-width: 5px;}
+    .stat .n {font-size: 1.5rem;}
+    .stat .l {font-size: .78rem;}
+    .stat .s {font-size: .68rem;}
+
+    .card {padding: 11px 12px; border-radius: 10px;}
+    .card-head {gap: 6px;}
+    .party {font-size: .95rem; width: 100%;}   /* naam apni poori line le */
+    .rank {height: 22px; min-width: 26px; font-size: .75rem;}
+    .pill, .pill-soft, .pill-stage {font-size: .66rem; padding: 2px 7px;}
+    .pill-stage {width: 100%; text-align: center;}
+    .desc {font-size: .8rem;}
+    .meta {font-size: .73rem;}
+
+    /* tabs ek line me scroll ho, tootein nahi */
+    .stTabs [data-baseweb="tab-list"] {
+      overflow-x: auto; flex-wrap: nowrap; scrollbar-width: none;
+    }
+    .stTabs [data-baseweb="tab-list"]::-webkit-scrollbar {display: none;}
+    .stTabs [data-baseweb="tab"] {white-space: nowrap; padding: 6px 10px;}
   }
 </style>
 """, unsafe_allow_html=True)
@@ -461,6 +492,11 @@ def render_card(row, show_rank: bool = True):
     desc = esc(row.get(COL_DESC, "")).replace("\n", "<br>")
     remark = esc(row.get(COL_REMARK, ""))
     party = esc(row.get(COL_PARTY, ""))
+    # PRODUCTION STAGE - sheet me jo bhi likha ho, waisa ka waisa dikhao.
+    # Kai line ho to ek hi line me jod dete hain (card saaf rehta hai).
+    stage = " · ".join(
+        p.strip() for p in esc(row.get(COL_PROD_STAGE, "")).splitlines() if p.strip()
+    )
     ordno = esc(row.get(COL_ORDER_NO, ""))
     del_txt = (row["del_date"].strftime("%d %b %Y")
                if not core._is_missing(row["del_date"]) else "—")
@@ -478,6 +514,7 @@ def render_card(row, show_rank: bool = True):
            if status in (STATUS_READY, STATUS_PARTY_DELAYED) else
            f'<span class="pill-soft">{fmt_days(row["days_left"])}</span>'
            if status != STATUS_DELIVERED else "")
+        + (f'<span class="pill-stage">🔧 {stage}</span>' if stage else "")
         + '</div>'
         f'<div class="desc">{desc}</div>'
         f'<div class="meta">📦 <b>{int(row["quantity"])}</b> pcs &nbsp;·&nbsp; '
@@ -638,11 +675,12 @@ with tab_table:
         st.caption(f"फ़िल्टर लगा है — {len(tdf)} / {len(df)} ऑर्डर")
     view = tdf[[
         "priority_rank", COL_ORDER_NO, COL_PARTY, "del_date", "days_left",
-        "status", "band", "quantity", COL_DESC, COL_REMARK, COL_STATUS,
+        "status", "band", "quantity", COL_PROD_STAGE, COL_DESC, COL_REMARK, COL_STATUS,
     ]].rename(columns={
         "priority_rank": "Priority", "del_date": "Delivery Date",
         "days_left": "Days Left", "status": "Status", "band": "Band",
         "quantity": "Qty", COL_STATUS: "STATUS (sheet)",
+        COL_PROD_STAGE: "Production Stage",
     })
     st.dataframe(view, use_container_width=True, hide_index=True)
     st.download_button(
@@ -670,6 +708,7 @@ with tab_table:
                     "DEL. DATE (sheet)": r[core.COL_DEL_DATE],
                     "DEL. DATE (padha gaya)": str(r["del_date"]),
                     "STATUS (sheet me jo hai)": repr(r[COL_STATUS]),
+                    "PRODUCTION STAGE": repr(r[COL_PROD_STAGE]),
                     "REMARK (sheet me jo hai)": repr(r[COL_REMARK]),
                     "STATUS (jo nikla)": r["status"],
                     "QUANTITY": int(r["quantity"]),

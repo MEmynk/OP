@@ -30,6 +30,7 @@ COL_PARTY = "PARTY NAME"
 COL_DESC = "DESCRIPTION"
 COL_REMARK = "REMARK"
 COL_STATUS = "STATUS"
+COL_PROD_STAGE = "PRODUCTION STAGE"
 
 # Sheet me header ka spelling thoda alag ho sakta hai - ye aliases try honge
 COLUMN_ALIASES = {
@@ -43,6 +44,10 @@ COLUMN_ALIASES = {
         "remark", "remarks", "remark/drliverrd", "remark/delivered", "note", "notes",
     ],
     COL_STATUS: ["status", "stats", "order status", "current status", "sthiti"],
+    COL_PROD_STAGE: [
+        "production stage", "prod stage", "production", "stage",
+        "making stage", "work stage", "production status",
+    ],
 }
 
 # --------------------------------------------------------------------------
@@ -369,7 +374,8 @@ def build_priority_table(raw: pd.DataFrame, settings: Settings | None = None) ->
     df = clean_raw_frame(raw)
     if df.empty:
         return pd.DataFrame(columns=[
-            COL_ORDER_NO, COL_PARTY, COL_DESC, COL_REMARK, COL_STATUS, "order_date",
+            COL_ORDER_NO, COL_PARTY, COL_DESC, COL_REMARK, COL_STATUS,
+            COL_PROD_STAGE, "order_date",
             "del_date", "status", "quantity", "days_left", "band", "priority_rank",
         ])
 
